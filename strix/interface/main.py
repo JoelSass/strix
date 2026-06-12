@@ -340,6 +340,12 @@ def _parse_credentials(
                     f"got {type(v).__name__} for key '{k}': '{credentials_file}'"
                 )
                 break  # unreachable; satisfies type checker
+            if not re.fullmatch(r"[A-Za-z0-9_]+", k):
+                parser.error(
+                    f"Invalid key '{k}' in '{credentials_file}': "
+                    "keys must contain only letters, digits, and underscores."
+                )
+                break  # unreachable
             str_values[str(k)] = v
         result.update(str_values)
 
