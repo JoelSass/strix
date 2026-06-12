@@ -338,12 +338,6 @@ def _parse_credentials(
                 parser.error(
                     f"Credentials file values must be strings, "
                     f"got {type(v).__name__} for key '{k}': '{credentials_file}'"
-        str_values: dict[str, str] = {}
-        for k, v in loaded.items():
-            if not isinstance(v, str):
-                parser.error(
-                    f"Credentials file values must be strings, "
-                    f"got {type(v).__name__} for key '{k}': '{credentials_file}'"
                 )
                 break  # unreachable; satisfies type checker
             if not re.fullmatch(r"[A-Za-z0-9_]+", k):
