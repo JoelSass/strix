@@ -22,6 +22,7 @@ re-merging the parent body. Track upstream for an injection hook.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from typing import Any
@@ -34,7 +35,10 @@ from agents.sandbox.sandboxes.docker import (
     _manifest_requires_fuse,
     _manifest_requires_sys_admin,
 )
+from agents.sandbox.session.sandbox_session import SandboxSession
+from docker import errors as docker_errors  # type: ignore[import-untyped, unused-ignore]
 from docker.models.containers import Container  # type: ignore[import-untyped, unused-ignore]
+from docker.types import Mount as DockerSDKMount  # type: ignore[import-untyped, unused-ignore]
 from docker.utils import parse_repository_tag  # type: ignore[import-untyped, unused-ignore]
 
 
@@ -42,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 
 class StrixDockerSandboxClient(DockerSandboxClient):
+    # Host directories to bind-mount into the container, set by the docker
+    # backend before ``create()``. Each item is ``{source, target, read_only}``.
+    strix_bind_mounts: list[dict[str, Any]] = []  # overridden per-instance in backends.py
+
     async def _create_container(
         self,
         image: str,
@@ -108,6 +116,21 @@ class StrixDockerSandboxClient(DockerSandboxClient):
         extra_hosts = create_kwargs.setdefault("extra_hosts", {})
         extra_hosts["host.docker.internal"] = "host-gateway"
 
+        # Strix injection: host bind mounts (e.g. large repos passed via --mount)
+        # that bypass the SDK's file-by-file LocalDir copy.
+        bind_mounts = getattr(self, "strix_bind_mounts", ())
+        if bind_mounts:
+            mounts = create_kwargs.setdefault("mounts", [])
+            for spec in bind_mounts:
+                mounts.append(
+                    DockerSDKMount(
+                        target=spec["target"],
+                        source=spec["source"],
+                        type="bind",
+                        read_only=spec.get("read_only", True),
+                    )
+                )
+
         logger.debug(
             "Creating sandbox container: image=%s caps=%s exposed_ports=%s",
             image,
@@ -121,3 +144,10 @@ class StrixDockerSandboxClient(DockerSandboxClient):
             image,
         )
         return container
+
+    async def delete(self, session: SandboxSession) -> SandboxSession:
+        container_id = getattr(getattr(session._inner, "state", None), "container_id", None)
+        if container_id:
+            with contextlib.suppress(docker_errors.NotFound, docker_errors.APIError):
+                self.docker_client.containers.get(container_id).kill()
+        return await super().delete(session)

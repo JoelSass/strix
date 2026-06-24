@@ -31,6 +31,7 @@ from textual.widgets import Button, Label, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
 from strix.config import load_settings
+from strix.core.hooks import BudgetExceededError
 from strix.core.runner import run_strix_scan
 from strix.interface.tui.live_view import TuiLiveView
 from strix.interface.tui.messages import send_user_message_to_agent
@@ -752,7 +753,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             self.report_state.cleanup()
 
         def signal_handler(_signum: int, _frame: Any) -> None:
-            self._teardown_sandbox_blocking(timeout=10.0)
+            self._fire_sandbox_cleanup()
             self.report_state.cleanup(status="interrupted")
             sys.exit(0)
 
@@ -1370,12 +1371,18 @@ class StrixTUIApp(App):  # type: ignore[misc]
                                 local_sources=getattr(self.args, "local_sources", None) or [],
                                 coordinator=self.coordinator,
                                 interactive=True,
+                                max_budget_usd=getattr(self.args, "max_budget_usd", None),
                                 event_sink=self._capture_sdk_event,
                             ),
                         )
 
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     logger.info("Scan interrupted by user")
+                except BudgetExceededError:
+                    # Defensive: the runner stops the scan cleanly on budget and
+                    # returns, so this normally never propagates. Treat it as a
+                    # graceful stop, not a scan error, if it ever does.
+                    logger.info("Scan stopped: --max-budget-usd limit reached")
                 except (ConnectionError, TimeoutError) as e:
                     logging.exception("Network error during scan")
                     self._scan_error = e
@@ -1706,36 +1713,25 @@ class StrixTUIApp(App):  # type: ignore[misc]
         )
 
     async def action_custom_quit(self) -> None:
-        await asyncio.to_thread(self._teardown_sandbox_blocking, timeout=10.0)
+        self._fire_sandbox_cleanup()
 
         if self._scan_thread and self._scan_thread.is_alive():
             self._scan_stop_event.set()
-            self._scan_thread.join(timeout=2.0)
 
         self.report_state.cleanup()
 
         self.exit()
 
-    def _teardown_sandbox_blocking(self, *, timeout: float) -> None:
+    def _fire_sandbox_cleanup(self) -> None:
+        self.coordinator.mark_shutting_down()
         loop = self._scan_loop
         if loop is None or loop.is_closed():
             return
         run_name = self.scan_config.get("run_name")
         if not run_name:
             return
-        future = asyncio.run_coroutine_threadsafe(
-            session_manager.cleanup(run_name),
-            loop,
-        )
-        try:
-            future.result(timeout=timeout)
-        except TimeoutError:
-            logger.warning(
-                "Sandbox cleanup timed out after %.1fs; container may still be running",
-                timeout,
-            )
-        except Exception:
-            logger.exception("Sandbox cleanup failed")
+        with contextlib.suppress(Exception):
+            asyncio.run_coroutine_threadsafe(session_manager.cleanup(run_name), loop)
 
     def _is_widget_safe(self, widget: Any) -> bool:
         try:
